@@ -22,6 +22,12 @@ rootdir = '/media/ssd/fanwen/MultiView/HRUKBB/'
 savedir = '/media/ssd/fanwen/MultiView/HRUKBB/GHBMesh'
 
 HRcases = ['HR_ES', 'HR_ED']
+center_aligned = True
+rescalar = 1/100
+B = 1
+sample_num = 2000
+
+
 casenames = os.listdir(datadir)
 
 root_path = os.path.dirname(os.path.realpath('.'))
@@ -29,11 +35,6 @@ base_shape_path = 'canonical_shapes/Standard_LV_2000.obj'
 base_shape_path = os.path.join(root_path, base_shape_path)
 bi_ventricle_path = 'canonical_shapes/Standard_BiV.obj'
 bi_ventricle_path = os.path.join(root_path, bi_ventricle_path)
-
-loss_dict = {'Loss_occupancy':1., 'Loss_normal_consistency':0.01, 'Loss_Laplacian':0.1, 'Loss_thickness':0.02}
-
-# base_shape_path = 'metadata/Standard_LV.obj'
-# bi_ventricle_path = 'metadata/Standard_BiV.obj'
 
 cfg = GHD_config(base_shape_path=base_shape_path,
             num_basis=6**2, mix_laplacian_tradeoff={'cotlap':1.0, 'dislap':0.1, 'stdlap':0.1},
@@ -52,75 +53,138 @@ for casename in casenames:
                 continue
             hr_nii_path = os.path.join(casedir, (HRcase + '.nii.gz'))
             output = dut.load_nib_image(hr_nii_path)
-            labels = torch.Tensor(output['img']).to(device).unsqueeze(0).unsqueeze(0)
-            affines = torch.Tensor(output['affine']).to(device).unsqueeze(0)
-            point_list = point_cloud_extractor(labels,  
-                                                [0,4,2,1], 
-                                                output['window_size'], 
-                                                spacing=200, 
-                                                coordinate_order = 'zyx')
-            coordinate_map_tem = dut.get_coord_map_3d(labels.shape[-3:], 
-                                            torch.eye(4).to(device), 
-                                            rescaler = 1/100.0)
+            label_torch = torch.from_numpy(output['img']).permute(2,1,0).unsqueeze(0).float()
+            affine_torch = torch.from_numpy(output['affine']).float()
+            window_size = torch.from_numpy(output['window_size']).float()
 
-            Z_rv, Y_rv, X_rv = torch.where(labels[0, 0]==4)
-            Z_lv, Y_lv, X_lv = torch.where(labels[0, 0]==2)
-            Z_cav, Y_cav, X_cav = torch.where(labels[0, 0]==1)
-            Z_bg, Y_bg, X_bg = torch.where(labels[0, 0]==0)
-            Z_point, Y_point, X_point = torch.where(labels[0, 0]==3)
+            affine_torch2np = torch.diag(torch.tensor([label_torch.shape[-1]-1.,
+                                          label_torch.shape[-2]-1.,
+                                           label_torch.shape[-3]-1.,
+                                           1.])/2)
+            if center_aligned:
+                affine_torch[:3, 3] = 0 # set the translation to 0
+            else:
+                affine_torch2np[:3, 3] = torch.tensor([label_torch.shape[-1]-1.,
+                                                    label_torch.shape[-2]-1.,
+                                                    label_torch.shape[-3]-1.])/2.
+                
+            affine_torch = affine_torch@affine_torch2np
+            affine_torch[:3,:] = affine_torch[:3,:]*rescalar
+            affine_torch[3,:] = torch.tensor([0,0,0,1])
+
+            label_tem = label_torch.clone().unsqueeze(1).to(device)
+
+            affine_tem = affine_torch.clone().to(device)
+            coordinate_map_tem = dut.get_coord_map_3d_normalized(label_tem.shape[-3:], 
+                                                                affine_tem)
+
+            B, C, Z, Y, X = label_tem.shape
+
+            Z_rv, Y_rv, X_rv = torch.where(label_tem[0, 0]==4)
+            Z_lv, Y_lv, X_lv = torch.where(label_tem[0, 0]==2)
+            Z_cav, Y_cav, X_cav = torch.where(label_tem[0, 0]==1)
+            Z_bg, Y_bg, X_bg = torch.where(label_tem[0, 0]==0)
+            Z_point, Y_point, X_point = torch.where(label_tem[0, 0]==3)
+
+            Pt_rv = coordinate_map_tem[0, Z_rv, Y_rv, X_rv]
+            Pt_lv = coordinate_map_tem[0, Z_lv, Y_lv, X_lv]
+            Pt_cav = coordinate_map_tem[0, Z_cav, Y_cav, X_cav]
+            Pt_bg = coordinate_map_tem[0, Z_bg, Y_bg, X_bg]
+
+            points_bi = torch.cat([Pt_rv, Pt_lv], dim=0)
+            points_lv = Pt_lv
+            points_outoflv = torch.cat([Pt_rv, Pt_cav, Pt_bg], dim=0)
+
+            geom_dict = get_4chamberview_frame(Pt_cav, Pt_lv, Pt_rv)
+            inital_affine = geom_dict['target_affine']
+
+
+            bbox_lv = torch.stack([Pt_lv.min(dim=0)[0]-0.05, Pt_lv.max(dim=0)[0]+0.05], dim=-1)
+
+            points_outoflv_in_bbox = points_outoflv[(points_outoflv[:,0]>bbox_lv[0,0]) & (points_outoflv[:,0]<bbox_lv[0,1]) & (points_outoflv[:,1]>bbox_lv[1,0]) & (points_outoflv[:,1]<bbox_lv[1,1]) & (points_outoflv[:,2]>bbox_lv[2,0]) & (points_outoflv[:,2]<bbox_lv[2,1])]
+
+            # ------ finish ------
+            paraheart.R = matrix_to_axis_angle(inital_affine[...,:3,:3].to(paraheart.device)).view(paraheart.R.shape)
+            paraheart.T = inital_affine[...,:3,3].to(paraheart.device).view(paraheart.T.shape)
             
-            b = 0
-            Pt_rv = coordinate_map_tem[b, Z_rv, Y_rv, X_rv]
-            Pt_lv = coordinate_map_tem[b, Z_lv, Y_lv, X_lv]
-            Pt_cav = coordinate_map_tem[b, Z_cav, Y_cav, X_cav]       
-            geom_dict = get_4chamberview_frame(Pt_cav, Pt_lv, Pt_rv)   
 
-            # initial global reg.
-            initial_orientation = geom_dict['target_affine'].cpu().numpy()
-            R = initial_orientation[:3, :3]
-            T = initial_orientation[:3, 3]
 
-            paraheart.R = matrix_to_axis_angle(torch.Tensor(R).to(paraheart.device)).view(paraheart.R.shape)
-            paraheart.T = torch.from_numpy(T).to(paraheart.device).view(paraheart.T.shape)
-
-            current_mesh = paraheart.rendering()
-            current_trimesh_bi = paraheart.rendering_bi_ventricle()
-
-            # cpd rigid alignment using the bi-ventricle mesh
-            points_bi = torch.cat(point_list[1:3], dim=0)
-            mesh_gt_bi_sample = points_bi.detach().cpu().numpy()[np.random.choice(points_bi.shape[0], 2000, replace=False)]
+            mesh_gt_bi_sample = points_bi.detach().cpu().numpy()[np.random.choice(points_bi.shape[0], sample_num, replace=False)]
             paraheart.global_registration_biv(mesh_gt_bi_sample)
 
 
-            # cpd rigid alignment using the LV mesh
-            points_lv = point_list[2]
-            mesh_gt_lv_sample = points_lv.detach().cpu().numpy()[np.random.choice(points_lv.shape[0], 2000, replace=False)]
-            paraheart.global_registration_lv(mesh_gt_lv_sample)
+            sample_lv = points_lv[np.random.choice(points_lv.shape[0], sample_num, replace=False)]
+            sample_outoflv = points_outoflv_in_bbox[np.random.choice(points_outoflv_in_bbox.shape[0], sample_num, replace=False)]
+            paraheart.global_registration_lv(sample_lv.detach().cpu().numpy())
 
-            # GHB morphing.
-            bbox_lv = torch.stack([points_lv.min(dim=0)[0], points_lv.max(dim=0)[0]], dim=0).T
-            rescale = 1.1
-            bbox_lv_center =  bbox_lv.mean(-1)
-            bbox_lv = torch.stack([bbox_lv_center-rescale*(bbox_lv_center-bbox_lv[:,0]), bbox_lv_center+rescale*(bbox_lv[:,1]-bbox_lv_center)], dim=-1)
+            # sample_outoflv = points_outoflv_in_bbox[np.random.choice(points_outoflv_in_bbox.shape[0], sample_num*5, replace=False)]
+            convergence, Loss_dict_list  = paraheart.morphing2lvtarget(points_lv, 
+                                                                       points_outoflv_in_bbox, 
+                                                                       loss_dict = {'Loss_occupancy':1, 'Loss_Laplacian':0.001, 'Loss_thickness': 0.001},
+                                                                       lr_start=1e-3, 
+                                                                       num_iter=2000, 
+                                                                       if_reset=True, 
+                                                                       if_fit_R=False, 
+                                                                       if_fit_s=True, 
+                                                                       if_fit_T=True, 
+                                                                       record_convergence=True)
 
-            points_outoflv = torch.cat([point_list[0], point_list[1]], dim=0)
-            points_outoflv_in_bbox = points_outoflv[(points_outoflv[:,0]>bbox_lv[0,0]) & (points_outoflv[:,0]<bbox_lv[0,1]) & (points_outoflv[:,1]>bbox_lv[1,0]) & (points_outoflv[:,1]<bbox_lv[1,1]) & (points_outoflv[:,2]>bbox_lv[2,0]) & (points_outoflv[:,2]<bbox_lv[2,1])]
-            points_outoflv_in_bbox = torch.cat([points_outoflv_in_bbox, point_list[-1]], dim=0)
+            rotation = paraheart.R.detach().cpu()
+            translation = paraheart.T.detach().cpu()
 
-            mesh_after_globalreg = paraheart.rendering()
-            # refinement of the LV mesh
-            current_mesh, loss_dict = paraheart.morphing2lvtarget(points_lv, 
-                                                                    points_outoflv_in_bbox, 
-                                                                    target_mesh=None, 
-                                                                    loss_dict = loss_dict,
-                                                                    lr_start=1e-3, 
-                                                                    num_iter=1000, 
-                                                                    num_sample=5000, 
-                                                                    NP_ratio=1,
-                                                                    if_reset=True, 
-                                                                    if_fit_R=False, 
-                                                                    if_fit_s=True, 
-                                                                    if_fit_T=True)
+            R = axis_angle_to_matrix(rotation).view(3,3)
+            T = translation.view(3,1)
+
+            # here is the affine matrix of the paraheart transformation
+            affine = torch.eye(4)
+            affine[:3,:3] = R
+            affine[:3,3] = T.squeeze()
+            affine[3, 3] = 1.0
+
+            affine_in = affine.inverse()
+
+            paraheart.R = torch.Tensor([0, 0, 0]).view(1,3).to(paraheart.device)
+            paraheart.T = torch.Tensor([0, 0, 0]).view(1,3).to(paraheart.device)
+
+            out_ghd_mesh = paraheart.rendering()
+
+            # sample the new image slices and the gt mesh.
+            affine_trans = affine_in.to(paraheart.device)
+            affine_torch_new = affine_trans @ affine_tem
+            coordinate_map_tem_new = dut.get_coord_map_3d_normalized(label_tem.shape[-3:], 
+                                                                    affine_torch_new)
+
+
+            Pt_lv_new = coordinate_map_tem_new[0, Z_lv, Y_lv, X_lv]
+            Pt_rv_new = coordinate_map_tem_new[0, Z_rv, Y_rv, X_rv]
+            Pt_cav_new = coordinate_map_tem_new[0, Z_cav, Y_cav, X_cav]
+            Pt_bg_new = coordinate_map_tem_new[0, Z_bg, Y_bg, X_bg]
+
+
+            points_bi_new = torch.cat([Pt_rv_new, Pt_lv_new], dim=0)
+            points_lv_new = Pt_lv_new
+            points_outoflv_new = torch.cat([Pt_rv_new, Pt_cav_new, Pt_bg_new], dim=0)
+
+            sample_num = 2000
+            sample_lv_new = points_lv_new[np.random.choice(points_lv_new.shape[0], 
+                                                        sample_num, replace=False)]
+            sample_outoflv_new = points_outoflv_new[np.random.choice(points_outoflv_new.shape[0], 
+                                                                    sample_num, replace=False)]
+
+            # new mesh groundtruth, inverse of the affine 
+            grid_trans_in = (affine_tem.inverse() @ affine.to(paraheart.device)).unsqueeze(0)[:, :3,:]
+            print(grid_trans_in.shape)
+            new_affine_grid_in = F.affine_grid(grid_trans_in, 
+                                            (1, 1, 200, 200, 200), 
+                                            align_corners=True)
+
+            label_torch_iso_cano = F.grid_sample(label_tem, 
+                                            new_affine_grid_in, 
+                                            mode='nearest', 
+                                            padding_mode='zeros', 
+                                            align_corners=True)
+            mesh_gt_lv_cano = cubify((label_torch_iso_cano==2).squeeze(1).float(), 0.5)
+
             # save the current_mesh
             save_path = os.path.join(savedir, casename)
             os.makedirs(save_path, exist_ok=True)
