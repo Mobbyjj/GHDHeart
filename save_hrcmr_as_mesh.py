@@ -12,18 +12,18 @@ import data.data_utils as dut
 from data_process.dataset_real_scaling import *
 from GHD.GHD_cardiac import GHD_Cardiac
 from GHD import GHD_config
-from ops.medical_related import get_4chamberview_frame
+from ops.medical_related import get_4chamberview_frame_proj_diff
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from pytorch3d.io import save_obj
 
-def affine_npimgzyx2torch(affine_np, 
-                    label_torch_size, 
+def affine_np2torch(affine_np, 
+                    img_size_np, 
                     rescalar = 1/100, 
                     center_aligned = True):
     '''
     convert affine matrix from numpy manner to torch manner (normed real world)
     affine_np: [4, 4] original affine matrix read from the medical image file
-    img_size: [3] the size of the image, [z, y, x]
+    img_size: [3] the size of the image, [x, y, z]
     rescalar: [1] the rescalar of the image, default is 1/100mm, [-100mm, 100mm] -> [-1, 1]
     center_aligned: [bool] whether the image is center aligned, default is True
     '''
@@ -32,17 +32,15 @@ def affine_npimgzyx2torch(affine_np,
     else:
         affine_np2w = affine_np.float()
 
-    affine_torch2np = torch.diag(torch.tensor([label_torch_size[-1]-1., 
-                                               label_torch_size[-2]-1., 
-                                               label_torch_size[-3]-1., 
-                                               1.]))/2.
+    affine_torch2np = torch.diag(torch.tensor([img_size_np[0]-1., 
+                                               img_size_np[1]-1., 
+                                               img_size_np[2]-1., 1.]))/2.
     if center_aligned:
         affine_np2w[:3, 3] = 0 # set the translation to 0
     else:
-        affine_torch2np[:3, 3] = torch.tensor([label_torch_size[-1]-1., 
-                                               label_torch_size[-2]-1., 
-                                               label_torch_size[-3]-1.])/2.
-    
+        affine_torch2np[:3, 3] = torch.tensor([img_size_np[0]-1., 
+                                               img_size_np[1]-1., 
+                                               img_size_np[2]-1.])/2.
     affine_t2w_ =  affine_np2w @ affine_torch2np
     affine_t2w_[:3,:] = affine_t2w_[:3,:]*rescalar
     affine_t2w_[3,:] = torch.tensor([0,0,0,1])
@@ -53,7 +51,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 datadir = '/media/ssd/fanwen/MultiView/HRUKBB/Dataset'
 rootdir = '/media/ssd/fanwen/MultiView/HRUKBB/'
-savedir = '/media/ssd/fanwen/MultiView/HRUKBB/GHBMesh'
+savedir = '/media/ssd/fanwen/MultiView/HRUKBB/GHBMesh_Pro_Diff'
 
 HRcases = ['HR_ES', 'HR_ED']
 center_aligned = True
@@ -90,12 +88,11 @@ for casename in casenames:
             label_torch = torch.from_numpy(output['img']).permute(2,1,0).unsqueeze(0).float()
             affine_torch = torch.from_numpy(output['affine']).float()
             rescalar = 1/100
-            # rescalar = 1/100
 
-            affine_t2w_ = affine_npimgzyx2torch(output['affine'],
-                                                label_torch.shape[-3:], 
-                                                rescalar=rescalar, 
-                                                center_aligned=True)
+            affine_t2w_ = affine_np2torch(output['affine'],
+                                          output['img'].shape[-3:], 
+                                          rescalar=rescalar, 
+                                          center_aligned=True)
             affine_t2w_ = affine_t2w_.to(device)
             
 
@@ -122,7 +119,7 @@ for casename in casenames:
             points_outoflv = torch.cat([Pt_rv, Pt_cav, Pt_bg], dim=0)
 
             # why 
-            geom_dict = get_4chamberview_frame(Pt_cav, Pt_lv, Pt_rv)
+            geom_dict = get_4chamberview_frame_proj_diff(Pt_cav, Pt_lv, Pt_rv)
             inital_affine = geom_dict['target_affine']
 
             bbox_lv = torch.stack([Pt_lv.min(dim=0)[0]-0.05, Pt_lv.max(dim=0)[0]+0.05], dim=-1)
@@ -131,9 +128,10 @@ for casename in casenames:
 
             paraheart.R = matrix_to_axis_angle(inital_affine[...,:3,:3].to(paraheart.device)).view(paraheart.R.shape)
             paraheart.T = inital_affine[...,:3,3].to(paraheart.device).view(paraheart.T.shape)
-
-            mesh_gt_bi_sample = points_bi.detach().cpu().numpy()[np.random.choice(points_bi.shape[0], sample_num, replace=False)]
-            paraheart.global_registration_biv(mesh_gt_bi_sample)
+            
+            # no need to reg the bi ventricle
+            # mesh_gt_bi_sample = points_bi.detach().cpu().numpy()[np.random.choice(points_bi.shape[0], sample_num, replace=False)]
+            # paraheart.global_registration_biv(mesh_gt_bi_sample)
 
             sample_lv = points_lv[np.random.choice(points_lv.shape[0], sample_num, replace=False)]
             sample_outoflv = points_outoflv_in_bbox[np.random.choice(points_outoflv_in_bbox.shape[0], sample_num, replace=False)]
@@ -171,8 +169,8 @@ for casename in casenames:
             # save the current_mesh
             save_path = os.path.join(savedir, casename)
             os.makedirs(save_path, exist_ok=True)
-
-            output_path = os.path.join(savedir, casename, (HRcase + '_GHD.obj'))
+            # instead of saving the obj, just save the vertices.
+            # output_path = os.path.join(savedir, casename, (HRcase + '_GHD.obj'))
 
             # If you have a batch of meshes, pick one (say the 0th):
             verts = current_mesh.verts_list()[0]    # (V, 3) tensor
@@ -183,13 +181,15 @@ for casename in casenames:
             faces = faces.detach().cpu()
 
             # Write
-            save_obj(output_path, verts, faces)
-
-
+            # save_obj(output_path, verts, faces)
             geom_dict = {
+                    'verts': verts.numpy(), # the vertices of the mesh
+                    'faces': faces.numpy(), # the faces of the mesh
                     'affine_target': inital_affine.detach().cpu().numpy(), # the target from canonical -> personal torch affine. 
-                    'affine_cano': affine.numpy()} # canonical shape -> personal torch                }
-            np.save(os.path.join(save_path, (HRcase + '_geom_dict.npy')), geom_dict)
+                    'affine_cano': affine.numpy(),
+                    'convergence': convergence,
+                    'loss': Loss_dict_list} # canonical shape -> personal torch                }
+            np.save(os.path.join(save_path, (HRcase + '.npy')), geom_dict)
         except Exception as e:
             print('Error in case: ', casename, HRcase)
             print(e)
