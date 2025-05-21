@@ -12,7 +12,7 @@ import data.data_utils as dut
 from data_process.dataset_real_scaling import *
 from GHD.GHD_cardiac import GHD_Cardiac
 from GHD import GHD_config
-from ops.medical_related import get_4chamberview_frame_proj_diff
+from ops.medical_related import get_4chamberview_frame
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from pytorch3d.io import save_obj
 
@@ -51,7 +51,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 datadir = '/media/ssd/fanwen/MultiView/HRUKBB/Dataset'
 rootdir = '/media/ssd/fanwen/MultiView/HRUKBB/'
-savedir = '/media/ssd/fanwen/MultiView/HRUKBB/GHBMesh_Pro_Diff'
+savedir = '/media/ssd/fanwen/MultiView/HRUKBB/GHBMesh'
 
 HRcases = ['HR_ES', 'HR_ED']
 center_aligned = True
@@ -119,7 +119,7 @@ for casename in casenames:
             points_outoflv = torch.cat([Pt_rv, Pt_cav, Pt_bg], dim=0)
 
             # why 
-            geom_dict = get_4chamberview_frame_proj_diff(Pt_cav, Pt_lv, Pt_rv)
+            geom_dict = get_4chamberview_frame(Pt_cav, Pt_lv, Pt_rv)
             inital_affine = geom_dict['target_affine']
 
             bbox_lv = torch.stack([Pt_lv.min(dim=0)[0]-0.05, Pt_lv.max(dim=0)[0]+0.05], dim=-1)
@@ -129,7 +129,7 @@ for casename in casenames:
             paraheart.R = matrix_to_axis_angle(inital_affine[...,:3,:3].to(paraheart.device)).view(paraheart.R.shape)
             paraheart.T = inital_affine[...,:3,3].to(paraheart.device).view(paraheart.T.shape)
             
-            # no need to reg the bi ventricle
+            # no need to reg the bi-ventricle, just use the initial affine
             # mesh_gt_bi_sample = points_bi.detach().cpu().numpy()[np.random.choice(points_bi.shape[0], sample_num, replace=False)]
             # paraheart.global_registration_biv(mesh_gt_bi_sample)
 
@@ -147,6 +147,7 @@ for casename in casenames:
                                                                        if_fit_s=True, 
                                                                        if_fit_T=True, 
                                                                        record_convergence=True)
+            Dice = 1 - paraheart.dice_evaluation(points_lv, points_outoflv_in_bbox)
 
             rotation = paraheart.R.detach().cpu()
             translation = paraheart.T.detach().cpu()
@@ -188,7 +189,7 @@ for casename in casenames:
                     'affine_target': inital_affine.detach().cpu().numpy(), # the target from canonical -> personal torch affine. 
                     'affine_cano': affine.numpy(),
                     'convergence': convergence,
-                    'loss': Loss_dict_list} # canonical shape -> personal torch                }
+                    'dice': Dice} # canonical shape -> personal torch                }
             np.save(os.path.join(save_path, (HRcase + '.npy')), geom_dict)
         except Exception as e:
             print('Error in case: ', casename, HRcase)
