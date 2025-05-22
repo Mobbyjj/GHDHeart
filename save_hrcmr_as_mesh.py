@@ -12,7 +12,7 @@ import data.data_utils as dut
 from data_process.dataset_real_scaling import *
 from GHD.GHD_cardiac import GHD_Cardiac
 from GHD import GHD_config
-from ops.medical_related import get_4chamberview_frame
+from ops.medical_related import get_4chamberview_frame_rv
 from pytorch3d.transforms import axis_angle_to_matrix, matrix_to_axis_angle
 from pytorch3d.io import save_obj
 
@@ -119,7 +119,7 @@ for casename in casenames:
             points_outoflv = torch.cat([Pt_rv, Pt_cav, Pt_bg], dim=0)
 
             # why 
-            geom_dict = get_4chamberview_frame(Pt_cav, Pt_lv, Pt_rv)
+            geom_dict = get_4chamberview_frame_rv(Pt_cav, Pt_lv, Pt_rv)
             inital_affine = geom_dict['target_affine']
 
             bbox_lv = torch.stack([Pt_lv.min(dim=0)[0]-0.05, Pt_lv.max(dim=0)[0]+0.05], dim=-1)
