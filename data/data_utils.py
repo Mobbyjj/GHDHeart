@@ -357,3 +357,141 @@ class GaussianBlur3D(nn.Module):
         coords = coords.expand(kernel_size, kernel_size, kernel_size)
         g = torch.exp(-(coords**2 + coords.transpose(0,1)**2 + coords.transpose(0,2)**2) / (2*sigma**2))
         return g / g.sum()
+
+def affine_np2torch(affine_np, 
+                    img_size_np, 
+                    rescalar = 1/100, 
+                    center_aligned = True):
+    '''
+    convert affine matrix from numpy manner to torch manner (normed real world)
+    affine_np: [4, 4] original affine matrix read from the medical image file
+    img_size: [3] the size of the image, [x, y, z]
+    rescalar: [1] the rescalar of the image, default is 1/100mm, [-100mm, 100mm] -> [-1, 1]
+    center_aligned: [bool] whether the image is center aligned, default is True
+    '''
+    if isinstance(affine_np, np.ndarray):
+        affine_np2w = torch.from_numpy(affine_np).float()
+    else:
+        affine_np2w = affine_np.float()
+
+    affine_torch2np = torch.eye(4).float()
+    affine_torch2np = torch.diag(torch.tensor([img_size_np[0]-1., 
+                                               img_size_np[1]-1., 
+                                               img_size_np[2]-1., 1.]))/2.
+    if center_aligned:
+        affine_np2w[:3, 3] = 0 # set the translation to 0
+    else:
+        affine_torch2np[:3, 3] = torch.tensor([img_size_np[0]-1., 
+                                               img_size_np[1]-1., 
+                                               img_size_np[2]-1.])/2.
+        
+    affine_t2w_ =  affine_np2w @ affine_torch2np
+    affine_t2w_[:3,:] = affine_t2w_[:3,:]*rescalar
+    affine_t2w_[3,:] = torch.tensor([0,0,0,1])
+    return affine_t2w_
+
+def get_coord_map_3d_normalized_new(image_shape, affine):
+    '''
+    Get the coordinate map of the image from the affine (torch manner) matrix
+    Args:
+        image_shape: the shape of the image D,H,W (Z,Y,X)
+        affine: the affine matrix of the image (torch manner)
+    return: 
+        the coordinate map of the image with shape (B,Z,Y,X,3)
+    '''
+    if isinstance(affine,torch.Tensor):
+        device = affine.device
+    elif isinstance(affine,np.ndarray):
+        device = torch.device('cpu')
+        affine = torch.from_numpy(affine).float()
+    else:
+        raise ValueError('The affine should be either torch.Tensor or np.ndarray')
+    
+    if len(affine.shape)==2:
+        affine = affine.unsqueeze(0)
+
+    B = affine.shape[0]
+    
+    
+    Z,Y,X = image_shape
+    # print(image_shape)
+    # TODO: if there is 1 in the image shape, we need to put it as 0
+    
+    # coord_map = torch.meshgrid([torch.arange(0,image_shape[-3+i]) for i in range(3)], indexing = 'ij')
+    # get the torch coordinate 
+    coord_map = torch.meshgrid([torch.linspace(-1,1,image_shape[i]) for i in range(3)], indexing = 'ij')
+    coord_map = torch.stack(coord_map[::-1],-1).float().to(device)
+
+    if Z == 1:
+        # generate the 2D meshgrid
+        y, x = torch.meshgrid(
+            torch.linspace(-1, 1, Y),
+            torch.linspace(-1, 1, X),
+            indexing='ij'
+        )
+        coord_map = torch.stack([x, y, torch.zeros_like(y)], dim=-1)
+
+    # print('coord_map shape', coord_map.shape) # Z,Y,X,3
+
+    ### Apply the affine matrix
+    coord_map = coord_map.unsqueeze(0).repeat(B,1,1,1,1) # B,Z,Y,X,3
+
+    coord_map = rearrange(coord_map,'b z y x c -> b (z y x) c')
+
+
+    # affine_t2w@t_coord -->  w_coord
+    coord_map = torch.matmul(coord_map,affine[:,:3,:3].transpose(-1,-2))+(affine[...,:3,3]).unsqueeze(-2)
+
+    coord_map = rearrange(coord_map,'b (z y x) c -> b z y x c',z=Z,y=Y,x=X)
+
+    return coord_map
+
+def affine_np2torch_new(affine_np, 
+                       img_size_np, 
+                       rescalar=1/100, 
+                       center_aligned=True,
+                       inner_center = (0,0,0)):
+    '''
+    Convert affine matrix from numpy (image) to torch (normalized real-world)
+    Supports 2D or 3D image volume.
+    '''
+
+    if isinstance(affine_np, np.ndarray):
+        affine_np2w = torch.from_numpy(affine_np).float()
+    else:
+        affine_np2w = affine_np.float()
+
+    # Ensure img_size has 3 elements (x, y, z)
+    img_size_np = list(img_size_np)
+    if len(img_size_np) != 3:
+        raise ValueError("img_size_np must be a sequence of 3 values (x, y, z)")
+
+    # Avoid zero scale by clamping minimum dimension size to 2
+    safe_img_size = torch.tensor([
+        max(img_size_np[0], 2),
+        max(img_size_np[1], 2),
+        max(img_size_np[2], 2)
+    ], dtype=torch.float32)
+
+    affine_torch2np = torch.diag((safe_img_size - 1) / 2)
+    
+    # print("affine_torch2np:", affine_torch2np)
+    affine_torch2np = torch.nn.functional.pad(affine_torch2np, (0,1,0,1))  # To 4x4
+    # print("affine_torch2np after padding:", affine_torch2np)
+    affine_torch2np[3, 3] = 1.0
+    # print(affine_torch2np)
+
+    if center_aligned:
+        affine_np2w[:3, 3] = 0  # zero translation
+    else:
+        # affine_np2w[:3, 3]-= inner_center
+        affine_torch2np[:3, 3] = (safe_img_size - 1) / 2
+    print(affine_torch2np)
+
+    # print(affine_torch2np,affine_np2w)
+    affine_t2w_ = affine_np2w @ affine_torch2np
+    affine_t2w_[:3, :] = affine_t2w_[:3, :] * rescalar
+    # diagonal is rescaler
+    affine_t2w_[3, :] = torch.tensor([0, 0, 0, 1], dtype=torch.float32)
+
+    return affine_t2w_

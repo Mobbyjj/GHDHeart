@@ -118,7 +118,6 @@ for casename in casenames:
             points_lv = Pt_lv
             points_outoflv = torch.cat([Pt_rv, Pt_cav, Pt_bg], dim=0)
 
-            # why 
             geom_dict = get_4chamberview_frame_rv(Pt_cav, Pt_lv, Pt_rv)
             inital_affine = geom_dict['target_affine']
 
