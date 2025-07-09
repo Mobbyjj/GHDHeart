@@ -486,7 +486,6 @@ def affine_np2torch_new(affine_np,
     else:
         # affine_np2w[:3, 3]-= inner_center
         affine_torch2np[:3, 3] = (safe_img_size - 1) / 2
-    print(affine_torch2np)
 
     # print(affine_torch2np,affine_np2w)
     affine_t2w_ = affine_np2w @ affine_torch2np
